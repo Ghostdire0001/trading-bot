@@ -1,5 +1,5 @@
 # trading_dashboard_render.py - Render Cloud Version
-
+import threading
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -472,3 +472,14 @@ with tab3:
 
 st.markdown("---")
 st.caption("⚠️ Educational purposes only. Not financial advice. Running 24/7 on Render.com")
+# Add to the bottom of trading_dashboard.py
+
+def keep_alive():
+    while True:
+        time.sleep(600)  # Every 10 minutes
+        try:
+            requests.get("https://your-app.onrender.com")
+        except:
+            pass
+
+threading.Thread(target=keep_alive, daemon=True).start()
