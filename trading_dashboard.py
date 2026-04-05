@@ -1,4 +1,4 @@
-# trading_dashboard_cloud.py - Cloud Version with Persistent Database
+# trading_dashboard_render.py - Render Cloud Version
 
 import streamlit as st
 import pandas as pd
@@ -12,18 +12,13 @@ import sqlite3
 from datetime import datetime as dt
 
 # ========== PERSISTENT DATABASE PATH ==========
-# Railway provides persistent storage at /app/data
-DB_DIR = "/app/data" if os.path.exists("/app") else "."
-DB_PATH = os.path.join(DB_DIR, "trading_journal.db")
-
-# Create directory if it doesn't exist
-if not os.path.exists(DB_DIR):
-    os.makedirs(DB_DIR)
+# Render provides persistent storage
+DB_PATH = "trading_journal.db"
 
 # ========== TELEGRAM CONFIGURATION ==========
-# Use environment variables for security (set these in Railway dashboard)
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8355355959:AAHDxCtlmMS76i4qZDE8iScdIB_DQSXQkNg")
-CHAT_ID = os.environ.get("CHAT_ID", "5329083681")
+# Get from environment variables (set in Render dashboard)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
 
 # ========== DATABASE FUNCTIONS ==========
 def init_database():
@@ -51,19 +46,25 @@ def init_database():
     
     conn.commit()
     conn.close()
+    print(f"✅ Database initialized at {DB_PATH}")
 
 def log_signal(symbol, asset_type, signal, price, rsi, macd, sma_20, sma_50, market_regime, confidence="medium"):
     """Log a trading signal to the database"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO signals (timestamp, symbol, asset_type, signal, price, rsi, macd, sma_20, sma_50, market_regime, confidence, was_accurate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (dt.now().isoformat(), symbol, asset_type, signal, price, rsi, macd, sma_20, sma_50, market_regime, confidence, 'pending'))
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO signals (timestamp, symbol, asset_type, signal, price, rsi, macd, sma_20, sma_50, market_regime, confidence, was_accurate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (dt.now().isoformat(), symbol, asset_type, signal, price, rsi, macd, sma_20, sma_50, market_regime, confidence, 'pending'))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error logging signal: {e}")
+        return False
 
 def get_signal_history(limit=50):
     """Get recent signals"""
@@ -161,11 +162,15 @@ def get_optimal_rsi_threshold():
         'confidence': 'high' if len(df) > 30 else 'medium'
     }
 
+# Initialize database
 init_database()
 
 # ========== TELEGRAM FUNCTIONS ==========
 def send_telegram_message(message, parse_mode="HTML"):
     """Send a message to your Telegram"""
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return "⚠️ Telegram not configured. Add TELEGRAM_TOKEN and CHAT_ID environment variables."
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": parse_mode}
     
@@ -205,8 +210,8 @@ def send_trading_signal(symbol, signal, price, rsi, reason=""):
 
 # ========== PAGE SETUP ==========
 st.set_page_config(page_title="Trading AI Cloud", layout="wide")
-st.title("🤖 AI Trading Assistant (Cloud)")
-st.caption(f"🚀 Running 24/7 | Database: {DB_PATH}")
+st.title("🤖 AI Trading Assistant (Render Cloud)")
+st.caption("🚀 Running 24/7 on Render.com | Database: SQLite")
 
 # ========== SESSION STATE ==========
 if 'auto_signal' not in st.session_state:
@@ -354,27 +359,39 @@ with tab1:
 with tab2:
     st.subheader("📱 Telegram Bot")
     
+    # Show config status
+    if TELEGRAM_TOKEN and CHAT_ID:
+        st.success("✅ Telegram configured!")
+    else:
+        st.warning("⚠️ Telegram not configured. Add TELEGRAM_TOKEN and CHAT_ID environment variables in Render dashboard.")
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📤 Send Test Message", use_container_width=True):
-            result = send_telegram_message("✅ Trading bot is connected and ready!")
-            if "✅" in result:
-                st.success(result)
+            if TELEGRAM_TOKEN and CHAT_ID:
+                result = send_telegram_message("✅ Trading bot is connected and ready on Render!")
+                if "✅" in result:
+                    st.success(result)
+                else:
+                    st.error(result)
             else:
-                st.error(result)
+                st.error("Please configure Telegram environment variables first")
     
     with col2:
         if st.button("📤 Send Current Signal", use_container_width=True):
-            result = send_trading_signal(symbol_display, signal, current_price, latest['RSI'], f"Current RSI: {latest['RSI']:.1f}")
-            if "✅" in result:
-                st.success(result)
+            if TELEGRAM_TOKEN and CHAT_ID:
+                result = send_trading_signal(symbol_display, signal, current_price, latest['RSI'], f"Current RSI: {latest['RSI']:.1f}")
+                if "✅" in result:
+                    st.success(result)
+                else:
+                    st.error(result)
+                
+                log_signal(symbol_display, asset_type, signal, current_price, latest['RSI'], 
+                          latest['MACD'], latest['SMA_20'], latest['SMA_50'], 
+                          "TRENDING" if latest['RSI'] > 50 else "RANGING", "medium")
+                st.info("📊 Signal logged to database")
             else:
-                st.error(result)
-            
-            log_signal(symbol_display, asset_type, signal, current_price, latest['RSI'], 
-                      latest['MACD'], latest['SMA_20'], latest['SMA_50'], 
-                      "TRENDING" if latest['RSI'] > 50 else "RANGING", "medium")
-            st.info("📊 Signal logged to database")
+                st.error("Please configure Telegram environment variables first")
     
     st.markdown("---")
     
@@ -383,27 +400,30 @@ with tab2:
     st.session_state['auto_signal'] = auto_enabled
     
     if auto_enabled:
-        st.success("✅ Auto-signals ENABLED")
-        current_rsi = latest['RSI']
-        
-        if (current_rsi < 30 or current_rsi > 70) and abs(current_rsi - st.session_state['last_sent_rsi']) > 5:
-            if current_rsi < 30:
-                signal_type = "STRONG BUY 🔥" if current_rsi < 25 else "BUY 📈"
-                reason = f"RSI oversold at {current_rsi:.1f}"
+        if TELEGRAM_TOKEN and CHAT_ID:
+            st.success("✅ Auto-signals ENABLED")
+            current_rsi = latest['RSI']
+            
+            if (current_rsi < 30 or current_rsi > 70) and abs(current_rsi - st.session_state['last_sent_rsi']) > 5:
+                if current_rsi < 30:
+                    signal_type = "STRONG BUY 🔥" if current_rsi < 25 else "BUY 📈"
+                    reason = f"RSI oversold at {current_rsi:.1f}"
+                else:
+                    signal_type = "STRONG SELL 🔻" if current_rsi > 75 else "SELL 📉"
+                    reason = f"RSI overbought at {current_rsi:.1f}"
+                
+                result = send_trading_signal(symbol_display, signal_type, current_price, current_rsi, reason)
+                st.info(f"Signal sent: {signal_type}")
+                
+                log_signal(symbol_display, asset_type, signal_type, current_price, current_rsi,
+                          latest['MACD'], latest['SMA_20'], latest['SMA_50'],
+                          "TRENDING" if current_rsi > 50 else "RANGING", "high" if "STRONG" in signal_type else "medium")
+                
+                st.session_state['last_sent_rsi'] = current_rsi
             else:
-                signal_type = "STRONG SELL 🔻" if current_rsi > 75 else "SELL 📉"
-                reason = f"RSI overbought at {current_rsi:.1f}"
-            
-            result = send_trading_signal(symbol_display, signal_type, current_price, current_rsi, reason)
-            st.info(f"Signal sent: {signal_type}")
-            
-            log_signal(symbol_display, asset_type, signal_type, current_price, current_rsi,
-                      latest['MACD'], latest['SMA_20'], latest['SMA_50'],
-                      "TRENDING" if current_rsi > 50 else "RANGING", "high" if "STRONG" in signal_type else "medium")
-            
-            st.session_state['last_sent_rsi'] = current_rsi
+                st.caption(f"📊 Current RSI: {current_rsi:.1f} | Last signal RSI: {st.session_state['last_sent_rsi']:.1f}")
         else:
-            st.caption(f"📊 Current RSI: {current_rsi:.1f} | Last signal RSI: {st.session_state['last_sent_rsi']:.1f}")
+            st.error("Cannot enable auto-signals: Telegram not configured")
 
 # ========== TAB 3: TRADING JOURNAL ==========
 with tab3:
@@ -451,4 +471,4 @@ with tab3:
         st.info("No signals logged yet. Send a signal to start your journal.")
 
 st.markdown("---")
-st.caption("⚠️ Educational purposes only. Not financial advice.")
+st.caption("⚠️ Educational purposes only. Not financial advice. Running 24/7 on Render.com")
