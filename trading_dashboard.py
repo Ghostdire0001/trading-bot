@@ -478,7 +478,7 @@ def keep_alive():
     while True:
         time.sleep(600)  # Every 10 minutes
         try:
-            requests.get("https://your-app.onrender.com")
+            requests.get("https://trading-bot-u2qk.onrender.com/")
         except:
             pass
 
