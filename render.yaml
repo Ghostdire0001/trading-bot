@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: trading-bot
+    runtime: python
+    repo: https://github.com/YOUR_USERNAME/trading-bot
+    plan: free
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run trading_dashboard_render.py --server.port $PORT --server.address 0.0.0.0
