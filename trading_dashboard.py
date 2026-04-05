@@ -1,5 +1,5 @@
-# trading_dashboard.py - Complete Level 3 Version
-# Features: Daily Reports, Paper Trading, MT5 Integration, ML Predictions
+# trading_dashboard.py - Complete Level 3 Version with MT5 Integration
+# Features: Daily Reports, Paper Trading, ML Predictions, MT5 Live Trading
 
 import streamlit as st
 import pandas as pd
@@ -13,11 +13,16 @@ import os
 import sqlite3
 from datetime import datetime as dt
 import json
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 import threading
 import random
+
+# ========== MT5 IMPORTS (Optional - only if installed) ==========
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+    print("MT5 not available - install with: pip install MetaTrader5")
 
 # ========== DATABASE SETUP ==========
 DB_PATH = "trading_journal.db"
@@ -26,17 +31,19 @@ DB_PATH = "trading_journal.db"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
-# ========== EMAIL CONFIGURATION (Optional) ==========
-EMAIL_ENABLED = os.environ.get("EMAIL_ENABLED", "False") == "True"
-EMAIL_SENDER = os.environ.get("EMAIL_SENDER", "")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
-EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER", "")
+# ========== MT5 CONFIGURATION (Update with your demo account) ==========
+MT5_LOGIN = 12345678  # Replace with your MT5 demo login
+MT5_PASSWORD = "your_password"  # Replace with your password
+MT5_SERVER = "MetaQuotes-Demo"  # Replace with your broker's demo server
 
-# ========== MT5 CONFIGURATION (Demo Account) ==========
-MT5_ENABLED = os.environ.get("MT5_ENABLED", "False") == "True"
-MT5_LOGIN = os.environ.get("MT5_LOGIN", "")
-MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
-MT5_SERVER = os.environ.get("MT5_SERVER", "MetaQuotes-Demo")
+# Symbol mapping
+SYMBOL_MAP = {
+    "EUR/USD": "EURUSD",
+    "GBP/USD": "GBPUSD",
+    "USD/JPY": "USDJPY",
+    "BTC/USD": "BTCUSD",
+    "ETH/USD": "ETHUSD",
+}
 
 # ========== PAPER TRADING ACCOUNT ==========
 PAPER_BALANCE = 10000.0
@@ -44,8 +51,6 @@ if 'paper_balance' not in st.session_state:
     st.session_state['paper_balance'] = PAPER_BALANCE
 if 'paper_positions' not in st.session_state:
     st.session_state['paper_positions'] = []
-if 'paper_history' not in st.session_state:
-    st.session_state['paper_history'] = []
 
 # ========== DATABASE FUNCTIONS ==========
 def init_database():
@@ -60,7 +65,7 @@ def init_database():
             macd REAL, sma_20 REAL, sma_50 REAL,
             bb_upper REAL, bb_lower REAL, volume REAL,
             market_regime TEXT, confidence TEXT, was_accurate TEXT DEFAULT 'pending',
-            prediction REAL, actual_move REAL
+            prediction REAL
         )
     ''')
     
@@ -77,7 +82,7 @@ def init_database():
         CREATE TABLE IF NOT EXISTS daily_reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT, total_signals INTEGER, accuracy REAL,
-            paper_pnl REAL, top_symbol TEXT, summary TEXT
+            paper_pnl REAL, summary TEXT
         )
     ''')
     
@@ -112,7 +117,7 @@ def get_signal_statistics():
     conn.close()
     
     if signals_df.empty:
-        return {'total_signals': 0, 'accuracy': 0}
+        return {'total_signals': 0, 'accuracy': 0, 'evaluated': 0}
     
     evaluated = signals_df[signals_df['was_accurate'] != 'pending']
     accurate_count = len(evaluated[evaluated['was_accurate'] == 'yes'])
@@ -137,11 +142,89 @@ def log_paper_trade(symbol, direction, entry_price, quantity, exit_price=None, p
     cursor.execute('''
         INSERT INTO paper_trades (timestamp, symbol, direction, entry_price, exit_price, quantity, pnl, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (dt.now().isoformat(), symbol, direction, entry_price, exit_price, quantity, pnl, 'open' if not exit_price else 'closed'))
+    ''', (dt.now().isoformat(), symbol, direction, entry_price, exit_price, quantity, pnl, 'closed'))
     conn.commit()
     conn.close()
 
 init_database()
+
+# ========== MT5 FUNCTIONS ==========
+def connect_mt5():
+    if not MT5_AVAILABLE:
+        return False, "MT5 not installed"
+    
+    if not mt5.initialize():
+        return False, "MT5 initialization failed"
+    
+    authorized = mt5.login(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
+    if authorized:
+        return True, f"Connected to account {MT5_LOGIN}"
+    else:
+        return False, f"Login failed: {mt5.last_error()}"
+
+def disconnect_mt5():
+    if MT5_AVAILABLE:
+        mt5.shutdown()
+    return True, "Disconnected"
+
+def get_mt5_account_info():
+    if not MT5_AVAILABLE or not mt5.terminal_info():
+        return None
+    
+    account = mt5.account_info()
+    if account:
+        return {
+            'balance': account.balance,
+            'equity': account.equity,
+            'free_margin': account.margin_free,
+            'profit': account.profit
+        }
+    return None
+
+def place_mt5_order(symbol, action, volume=0.01, sl_points=50, tp_points=100):
+    if not MT5_AVAILABLE:
+        return None, "MT5 not available"
+    
+    mt5_symbol = SYMBOL_MAP.get(symbol, symbol.replace("/", ""))
+    
+    tick = mt5.symbol_info_tick(mt5_symbol)
+    if not tick:
+        return None, "Failed to get price"
+    
+    point = mt5.symbol_info(mt5_symbol).point
+    
+    if action == "BUY":
+        order_type = mt5.ORDER_TYPE_BUY
+        price = tick.ask
+        sl = price - sl_points * point if sl_points else 0
+        tp = price + tp_points * point if tp_points else 0
+    else:
+        order_type = mt5.ORDER_TYPE_SELL
+        price = tick.bid
+        sl = price + sl_points * point if sl_points else 0
+        tp = price - tp_points * point if tp_points else 0
+    
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": mt5_symbol,
+        "volume": volume,
+        "type": order_type,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "deviation": 10,
+        "magic": 123456,
+        "comment": "AI Trading Bot",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    
+    result = mt5.order_send(request)
+    
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+        return result, f"Order placed! Ticket: {result.order}"
+    else:
+        return None, f"Order failed: {result.comment}"
 
 # ========== TELEGRAM FUNCTIONS ==========
 def send_telegram_message(message):
@@ -156,47 +239,20 @@ def send_telegram_message(message):
         return "❌ Failed"
 
 def send_daily_report(report_text):
-    """Send daily summary report to Telegram"""
     send_telegram_message(f"📊 <b>DAILY TRADING REPORT</b>\n\n{report_text}")
-
-# ========== EMAIL FUNCTIONS ==========
-def send_email_report(subject, body):
-    if not EMAIL_ENABLED:
-        return
-    
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_SENDER
-        msg['To'] = EMAIL_RECEIVER
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'html'))
-        
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-    except Exception as e:
-        print(f"Email error: {e}")
 
 # ========== PAPER TRADING ==========
 def execute_paper_trade(symbol, signal, price, confidence):
-    """Execute a paper trade based on signal"""
-    
     if "BUY" in signal:
         direction = "BUY"
-        quantity = (st.session_state['paper_balance'] * 0.02) / price  # 2% risk
+        quantity = (st.session_state['paper_balance'] * 0.02) / price
     elif "SELL" in signal:
         direction = "SELL"
         quantity = (st.session_state['paper_balance'] * 0.02) / price
     else:
         return None
     
-    # Simulate price movement after trade (for demo)
-    if confidence == "HIGH":
-        expected_move = random.uniform(0.01, 0.03)  # 1-3% move
-    else:
-        expected_move = random.uniform(-0.005, 0.015)
+    expected_move = random.uniform(0.005, 0.02) if confidence == "HIGH" else random.uniform(-0.005, 0.01)
     
     if direction == "BUY":
         exit_price = price * (1 + expected_move)
@@ -204,8 +260,6 @@ def execute_paper_trade(symbol, signal, price, confidence):
     else:
         exit_price = price * (1 - expected_move)
         pnl = (price - exit_price) * quantity
-    
-    pnl_percent = (pnl / (price * quantity)) * 100
     
     trade = {
         'timestamp': dt.now(),
@@ -215,13 +269,12 @@ def execute_paper_trade(symbol, signal, price, confidence):
         'exit_price': exit_price,
         'quantity': quantity,
         'pnl': pnl,
-        'pnl_percent': pnl_percent
+        'pnl_percent': (pnl / (price * quantity)) * 100
     }
     
     st.session_state['paper_positions'].append(trade)
     st.session_state['paper_balance'] += pnl
     log_paper_trade(symbol, direction, price, quantity, exit_price, pnl)
-    
     return trade
 
 def get_paper_stats():
@@ -233,36 +286,35 @@ def get_paper_stats():
     
     return {
         'total_trades': len(trades),
-        'winning_trades': len(winning),
-        'win_rate': (len(winning) / len(trades)) * 100,
+        'win_rate': (len(winning) / len(trades)) * 100 if trades else 0,
         'total_pnl': sum(t['pnl'] for t in trades),
-        'avg_pnl': sum(t['pnl'] for t in trades) / len(trades),
-        'best_trade': max(t['pnl'] for t in trades),
-        'worst_trade': min(t['pnl'] for t in trades)
+        'best_trade': max(t['pnl'] for t in trades) if trades else 0,
+        'worst_trade': min(t['pnl'] for t in trades) if trades else 0
     }
 
-# ========== MACHINE LEARNING PREDICTIONS ==========
+# ========== ML PREDICTIONS ==========
 class SimpleMLPredictor:
     def __init__(self):
         self.model_trained = False
-        
+        self.buy_threshold = 30
+        self.sell_threshold = 70
+    
     def train(self, df):
-        """Train a simple prediction model from historical signals"""
         if df.empty or len(df) < 10:
             return
         
-        # Simple logic: learn optimal RSI thresholds
         accurate = df[df['was_accurate'] == 'yes']
         if not accurate.empty:
             buy_signals = accurate[accurate['signal'].str.contains('BUY', na=False)]
             sell_signals = accurate[accurate['signal'].str.contains('SELL', na=False)]
             
-            self.buy_threshold = buy_signals['rsi'].mean() if not buy_signals.empty else 30
-            self.sell_threshold = sell_signals['rsi'].mean() if not sell_signals.empty else 70
+            if not buy_signals.empty:
+                self.buy_threshold = buy_signals['rsi'].mean()
+            if not sell_signals.empty:
+                self.sell_threshold = sell_signals['rsi'].mean()
             self.model_trained = True
     
     def predict(self, rsi):
-        """Predict if price will go up or down"""
         if not self.model_trained:
             return "NEUTRAL", 0.5
         
@@ -277,92 +329,37 @@ ml_predictor = SimpleMLPredictor()
 
 # ========== PATTERN RECOGNITION ==========
 def detect_patterns(df):
-    """Detect basic chart patterns"""
     patterns = []
-    
     if len(df) < 20:
         return patterns
     
     close = df['Close'].values
-    high = df['High'].values
-    low = df['Low'].values
+    high = df['High'].values if 'High' in df else df['Close'].values * 1.01
+    low = df['Low'].values if 'Low' in df else df['Close'].values * 0.99
     
-    # Head and Shoulders (simplified)
-    recent_highs = high[-10:]
-    if max(recent_highs) == recent_highs[5] and recent_highs[0] > recent_highs[-1]:
-        patterns.append("🔴 Potential Head & Shoulders (Bearish)")
+    if max(high[-10:]) == high[-5] and high[0] > high[-1]:
+        patterns.append("🔴 Potential Head & Shoulders")
     
-    # Double Bottom
-    recent_lows = low[-10:]
-    if recent_lows[0] < recent_lows[2] < recent_lows[4] and recent_lows[-1] > recent_lows[-3]:
-        patterns.append("🟢 Double Bottom (Bullish)")
-    
-    # Trend detection
-    sma_20 = df['SMA_20'].values if 'SMA_20' in df else None
-    if sma_20 is not None and len(sma_20) > 5:
-        if sma_20[-1] > sma_20[-5]:
-            patterns.append("📈 Uptrend Detected")
-        elif sma_20[-1] < sma_20[-5]:
-            patterns.append("📉 Downtrend Detected")
+    if low[-1] > low[-3] and low[-3] > low[-5]:
+        patterns.append("🟢 Higher Lows - Bullish")
     
     return patterns
 
-# ========== DAILY REPORT GENERATOR ==========
+# ========== DAILY REPORT ==========
 def generate_daily_report():
-    """Generate and send daily performance report"""
     stats = get_signal_statistics()
     paper_stats = get_paper_stats()
     
-    today = dt.now().strftime('%Y-%m-%d')
-    
     report = f"""
-📅 <b>Date:</b> {today}
+📅 <b>{dt.now().strftime('%Y-%m-%d')}</b>
 ━━━━━━━━━━━━━━━━━━━━
-<b>SIGNAL PERFORMANCE</b>
-• Total Signals: {stats['total_signals']}
-• Accuracy: {stats['accuracy']:.1f}%
-
-<b>PAPER TRADING</b>
-• Total Trades: {paper_stats['total_trades']}
-• Win Rate: {paper_stats['win_rate']:.1f}%
-• Total P&L: ${paper_stats['total_pnl']:.2f}
-
-<b>AI STATUS</b>
-• Model: {'Trained' if ml_predictor.model_trained else 'Learning'}
-• Signals: {'Auto ON' if st.session_state.get('auto_signal', False) else 'Manual'}
-
-<i>Keep reviewing signals to improve AI accuracy!</i>
-"""
-    
-    # Send to Telegram
+<b>Signals:</b> {stats['total_signals']}
+<b>Accuracy:</b> {stats['accuracy']:.1f}%
+<b>Paper P&L:</b> ${paper_stats['total_pnl']:.2f}
+<b>Win Rate:</b> {paper_stats['win_rate']:.1f}%
+    """
     send_daily_report(report)
-    
-    # Send to email if configured
-    if EMAIL_ENABLED:
-        send_email_report(f"Daily Trading Report - {today}", report)
-    
-    # Log to database
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO daily_reports (date, total_signals, accuracy, paper_pnl, summary)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (today, stats['total_signals'], stats['accuracy'], paper_stats['total_pnl'], report))
-    conn.commit()
-    conn.close()
-    
     return report
-
-# ========== SCHEDULED TASKS ==========
-def schedule_daily_report():
-    """Run daily report at 9 AM"""
-    while True:
-        now = dt.now()
-        # Run at 9:00 AM
-        if now.hour == 9 and now.minute == 0:
-            generate_daily_report()
-            time.sleep(60)  # Wait to avoid multiple runs
-        time.sleep(30)
 
 # ========== DATA FETCHING ==========
 @st.cache_data(ttl=30)
@@ -373,11 +370,10 @@ def get_live_forex_rates():
         data = response.json()
         if "rates" in data:
             return {"EUR": data["rates"].get("EUR", 0.92), "GBP": data["rates"].get("GBP", 0.79), 
-                    "JPY": data["rates"].get("JPY", 148.5), "CAD": data["rates"].get("CAD", 1.36),
-                    "AUD": data["rates"].get("AUD", 1.52)}
+                    "JPY": data["rates"].get("JPY", 148.5)}
     except:
         pass
-    return {"EUR": 0.92, "GBP": 0.79, "JPY": 148.5, "CAD": 1.36, "AUD": 1.52}
+    return {"EUR": 0.92, "GBP": 0.79, "JPY": 148.5}
 
 @st.cache_data(ttl=60)
 def get_live_crypto_price(coin="bitcoin"):
@@ -389,19 +385,20 @@ def get_live_crypto_price(coin="bitcoin"):
     except:
         return None
 
-def generate_multi_timeframe_data(current_price, symbol_name):
-    dates_daily = pd.date_range(end=datetime.now(), periods=60, freq='D')
-    
-    np.random.seed(hash(symbol_name) % 2**32)
-    changes = np.random.normal(0, 0.015, 60)
+def generate_chart_data(current_price, days=60):
+    dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
+    np.random.seed(42)
+    changes = np.random.normal(0, 0.015, days)
     prices = [current_price]
     for change in changes[1:]:
         prices.append(prices[-1] * (1 + change))
     
-    df = pd.DataFrame({'Date': dates_daily, 'Close': prices})
+    df = pd.DataFrame({'Date': dates, 'Close': prices, 'High': prices, 'Low': prices})
     df.set_index('Date', inplace=True)
     
-    # Calculate indicators
+    df['High'] = df['Close'] * 1.01
+    df['Low'] = df['Close'] * 0.99
+    
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -421,52 +418,36 @@ def generate_multi_timeframe_data(current_price, symbol_name):
     df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
     df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
     
-    df['High'] = df['Close'] * 1.01
-    df['Low'] = df['Close'] * 0.99
-    
     return df
-
-def get_enhanced_signal(df):
-    rsi = df['RSI'].iloc[-1] if not pd.isna(df['RSI'].iloc[-1]) else 50
-    macd = df['MACD'].iloc[-1] if not pd.isna(df['MACD'].iloc[-1]) else 0
-    signal = df['Signal'].iloc[-1] if not pd.isna(df['Signal'].iloc[-1]) else 0
-    
-    if rsi < 30 and macd > signal:
-        return "STRONG BUY 🔥", rsi, "HIGH"
-    elif rsi < 30:
-        return "BUY 📈", rsi, "MEDIUM"
-    elif rsi > 70 and macd < signal:
-        return "STRONG SELL 🔻", rsi, "HIGH"
-    elif rsi > 70:
-        return "SELL 📉", rsi, "MEDIUM"
-    else:
-        return "HOLD ⏸️", rsi, "LOW"
 
 # ========== PAGE SETUP ==========
 st.set_page_config(page_title="Trading AI Pro", layout="wide")
-st.title("🤖 AI Trading Assistant Pro - Level 3")
-st.caption("Daily Reports | Paper Trading | ML Predictions | Pattern Recognition")
+st.title("🤖 AI Trading Assistant Pro - Complete Edition")
+st.caption("Daily Reports | Paper Trading | ML Predictions | MT5 Integration | 24/7 Live")
 
 # ========== SESSION STATE ==========
 if 'auto_signal' not in st.session_state:
     st.session_state['auto_signal'] = False
 if 'last_sent_signal' not in st.session_state:
     st.session_state['last_sent_signal'] = ""
+if 'mt5_connected' not in st.session_state:
+    st.session_state['mt5_connected'] = False
 
 # ========== SIDEBAR ==========
 st.sidebar.header("📊 Trading Settings")
 asset_type = st.sidebar.selectbox("Asset Type", ["Forex", "Crypto"])
 
 if asset_type == "Forex":
-    currency = st.sidebar.selectbox("Currency", ["EUR", "GBP", "JPY", "CAD", "AUD"])
+    currency = st.sidebar.selectbox("Currency", ["EUR", "GBP", "JPY"])
     rates = get_live_forex_rates()
     current_price = rates[currency]
     symbol_display = f"{currency}/USD"
 else:
-    coin_map = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana"}
-    coin_display = st.sidebar.selectbox("Cryptocurrency", ["BTC", "ETH", "SOL"])
-    current_price = get_live_crypto_price(coin_map[coin_display]) or 65000
-    symbol_display = coin_display
+    coin_display = st.sidebar.selectbox("Cryptocurrency", ["BTC", "ETH"])
+    current_price = get_live_crypto_price(coin_display.lower())
+    if not current_price:
+        current_price = 65000 if coin_display == "BTC" else 3500
+    symbol_display = f"{coin_display}/USD"
 
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
@@ -474,12 +455,33 @@ if st.sidebar.button("🔄 Refresh Data"):
 
 # ========== GENERATE DATA ==========
 with st.spinner("Analyzing markets..."):
-    df = generate_multi_timeframe_data(current_price, symbol_display)
+    df = generate_chart_data(current_price)
 
-signal, rsi, confidence = get_enhanced_signal(df)
+latest = df.iloc[-1]
+rsi = latest['RSI'] if not pd.isna(latest['RSI']) else 50
+macd = latest['MACD'] if not pd.isna(latest['MACD']) else 0
+signal_line = latest['Signal'] if not pd.isna(latest['Signal']) else 0
+
+# Generate signal
+if rsi < 30 and macd > signal_line:
+    signal = "STRONG BUY 🔥"
+    confidence = "HIGH"
+elif rsi < 30:
+    signal = "BUY 📈"
+    confidence = "MEDIUM"
+elif rsi > 70 and macd < signal_line:
+    signal = "STRONG SELL 🔻"
+    confidence = "HIGH"
+elif rsi > 70:
+    signal = "SELL 📉"
+    confidence = "MEDIUM"
+else:
+    signal = "HOLD ⏸️"
+    confidence = "LOW"
+
 patterns = detect_patterns(df)
 
-# Train ML model
+# Train ML
 history = get_signal_history(100)
 ml_predictor.train(history)
 ml_prediction, ml_confidence = ml_predictor.predict(rsi)
@@ -487,7 +489,7 @@ ml_prediction, ml_confidence = ml_predictor.predict(rsi)
 # ========== TABS ==========
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Dashboard", "📱 Telegram", "💰 Paper Trading", 
-    "🧠 ML Predictions", "📓 Journal", "📥 Export"
+    "🧠 ML Predictions", "💹 Live Trading (MT5)", "📓 Journal & Export"
 ])
 
 # ========== TAB 1: DASHBOARD ==========
@@ -529,7 +531,7 @@ with tab2:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📤 Send Test Message"):
-            send_telegram_message("✅ Bot is live!")
+            send_telegram_message("✅ Trading bot is live!")
             st.success("Sent!")
     
     with col2:
@@ -543,7 +545,7 @@ with tab2:
     st.session_state['auto_signal'] = auto_enabled
     
     if auto_enabled and signal != "HOLD ⏸️" and signal != st.session_state['last_sent_signal']:
-        send_telegram_message(f"🚨 AUTO SIGNAL: {symbol_display} - {signal}\nPrice: ${current_price:,.2f}\nRSI: {rsi:.1f}")
+        send_telegram_message(f"🚨 AUTO: {symbol_display} - {signal}\nPrice: ${current_price:,.2f}\nRSI: {rsi:.1f}")
         st.session_state['last_sent_signal'] = signal
         st.info("Auto-signal sent!")
 
@@ -575,12 +577,10 @@ with tab3:
         if trade:
             st.success(f"✅ Trade executed! P&L: ${trade['pnl']:.2f} ({trade['pnl_percent']:.1f}%)")
             log_signal(symbol_display, asset_type, signal, current_price, rsi, rsi, rsi,
-                      df['MACD'].iloc[-1], df['SMA_20'].iloc[-1], df['SMA_50'].iloc[-1],
-                      df['BB_Upper'].iloc[-1], df['BB_Lower'].iloc[-1], 1.0,
+                      macd, latest['SMA_20'], latest['SMA_50'],
+                      latest['BB_Upper'], latest['BB_Lower'], 1.0,
                       "TRENDING" if rsi > 50 else "RANGING", confidence.lower())
             st.rerun()
-        else:
-            st.warning("Cannot execute - invalid signal")
     
     if st.session_state['paper_positions']:
         st.subheader("Recent Trades")
@@ -601,7 +601,6 @@ with tab4:
     
     st.progress(ml_confidence, text=f"Confidence: {ml_confidence*100:.0f}%")
     
-    # Show learning progress
     stats = get_signal_statistics()
     if stats['evaluated'] > 0:
         st.write(f"📊 Trained on {stats['evaluated']} reviewed signals")
@@ -612,17 +611,92 @@ with tab4:
             st.success(f"✅ Optimal Sell RSI: {ml_predictor.sell_threshold:.1f}")
     else:
         st.warning("⚠️ Review more signals to train the AI model")
-    
-    # Feature importance
-    st.subheader("📊 Feature Importance")
-    feature_df = pd.DataFrame({
-        'Feature': ['RSI Value', 'Volume Ratio', 'Bollinger Position', 'MACD Cross'],
-        'Importance': [0.45, 0.25, 0.20, 0.10]
-    })
-    st.bar_chart(feature_df.set_index('Feature'))
 
-# ========== TAB 5: JOURNAL ==========
+# ========== TAB 5: LIVE TRADING (MT5) ==========
 with tab5:
+    st.subheader("💹 MetaTrader 5 Live Trading (Demo Account)")
+    
+    if not MT5_AVAILABLE:
+        st.error("❌ MetaTrader5 not installed. Run: pip install MetaTrader5")
+    else:
+        # Connection status
+        if not st.session_state['mt5_connected']:
+            if st.button("🔌 Connect to MT5 Demo Account", use_container_width=True):
+                success, msg = connect_mt5()
+                if success:
+                    st.session_state['mt5_connected'] = True
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+            st.info(f"📝 Update your MT5 credentials in the code:\nLogin: {MT5_LOGIN}\nServer: {MT5_SERVER}")
+        else:
+            st.success("✅ Connected to MT5 Demo Account")
+            
+            # Account info
+            account = get_mt5_account_info()
+            if account:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Balance", f"${account['balance']:.2f}")
+                with col2:
+                    st.metric("Equity", f"${account['equity']:.2f}")
+                with col3:
+                    st.metric("Free Margin", f"${account['free_margin']:.2f}")
+                with col4:
+                    profit_color = "green" if account['profit'] >= 0 else "red"
+                    st.metric("P&L", f"${account['profit']:.2f}", delta_color=profit_color)
+            
+            # Manual order
+            st.subheader("Manual Order Entry")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                mt5_symbol = st.selectbox("Symbol", list(SYMBOL_MAP.keys()))
+            with col2:
+                mt5_action = st.selectbox("Action", ["BUY", "SELL"])
+            with col3:
+                mt5_volume = st.number_input("Volume (Lots)", 0.01, 1.0, 0.01, 0.01)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                mt5_sl = st.number_input("Stop Loss (pips)", 0, 200, 50)
+            with col2:
+                mt5_tp = st.number_input("Take Profit (pips)", 0, 500, 100)
+            
+            if st.button(f"Place {mt5_action} Order", use_container_width=True):
+                result, msg = place_mt5_order(mt5_symbol, mt5_action, mt5_volume, mt5_sl, mt5_tp)
+                if result:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+            
+            # Auto-trade from signal
+            st.markdown("---")
+            st.subheader("🤖 Auto-Trade from AI Signal")
+            
+            if st.button(f"Auto-Trade Current Signal: {signal}", use_container_width=True):
+                if signal != "HOLD ⏸️":
+                    mt5_symbol_input = symbol_display if symbol_display in SYMBOL_MAP else "EUR/USD"
+                    result, msg = place_mt5_order(mt5_symbol_input, "BUY" if "BUY" in signal else "SELL", 0.01, 50, 100)
+                    if result:
+                        st.success(f"Auto-trade executed! {msg}")
+                        log_signal(symbol_display, asset_type, signal, current_price, rsi, rsi, rsi,
+                                  macd, latest['SMA_20'], latest['SMA_50'],
+                                  latest['BB_Upper'], latest['BB_Lower'], 1.0,
+                                  "TRENDING" if rsi > 50 else "RANGING", confidence.lower())
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("No active signal")
+            
+            # Disconnect
+            if st.button("🔌 Disconnect from MT5", use_container_width=True):
+                disconnect_mt5()
+                st.session_state['mt5_connected'] = False
+                st.rerun()
+
+# ========== TAB 6: JOURNAL & EXPORT ==========
+with tab6:
     st.subheader("📓 Trading Journal")
     
     stats = get_signal_statistics()
@@ -652,32 +726,25 @@ with tab5:
                         update_signal_accuracy(row['id'], 'no')
                         st.rerun()
         
-        st.subheader("Signal History")
-        display_df = history[['timestamp', 'symbol', 'signal', 'price', 'rsi', 'was_accurate']].head(20)
-        display_df.columns = ['Time', 'Symbol', 'Signal', 'Price', 'RSI', 'Accuracy']
-        st.dataframe(display_df, use_container_width=True)
+        st.subheader("📥 Export Data")
+        if st.button("Export to CSV"):
+            csv = history.to_csv(index=False)
+            st.download_button("Download CSV", csv, f"journal_{dt.now().strftime('%Y%m%d')}.csv", "text/csv")
 
-# ========== TAB 6: EXPORT ==========
-with tab6:
-    st.subheader("📥 Export Data")
-    
-    if st.button("📥 Export Full Journal to CSV"):
-        history = get_signal_history(1000)
-        csv = history.to_csv(index=False)
-        st.download_button("Download CSV", csv, f"trading_journal_{dt.now().strftime('%Y%m%d')}.csv", "text/csv")
-    
-    if st.button("📥 Export Paper Trading History"):
-        if st.session_state['paper_positions']:
-            df = pd.DataFrame(st.session_state['paper_positions'])
-            csv = df.to_csv(index=False)
-            st.download_button("Download Paper Trades", csv, f"paper_trades_{dt.now().strftime('%Y%m%d')}.csv", "text/csv")
-
-# ========== START DAILY REPORT SCHEDULER ==========
+# ========== DAILY REPORT SCHEDULER ==========
 if not hasattr(st, 'report_scheduler_started'):
+    def schedule_daily_report():
+        while True:
+            now = dt.now()
+            if now.hour == 9 and now.minute == 0:
+                generate_daily_report()
+                time.sleep(60)
+            time.sleep(30)
+    
     report_thread = threading.Thread(target=schedule_daily_report, daemon=True)
     report_thread.start()
     st.report_scheduler_started = True
 
 # ========== FOOTER ==========
 st.markdown("---")
-st.caption("⚠️ Educational purposes only | Level 3 Features: Daily Reports | Paper Trading | ML Predictions | Pattern Recognition")
+st.caption("⚠️ Educational purposes only | Level 3 Complete: Daily Reports | Paper Trading | ML Predictions | MT5 Integration")
