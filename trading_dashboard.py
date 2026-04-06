@@ -1,5 +1,4 @@
-# trading_dashboard.py - Complete Cloud-Ready Version
-# Features: Paper Trading, ML, Daily Reports, Oanda API (Cloud)
+# trading_dashboard.py - FCS API Version (100% Free, No API Key)
 
 import streamlit as st
 import pandas as pd
@@ -14,9 +13,6 @@ from datetime import datetime as dt
 import json
 import threading
 import random
-import hmac
-import hashlib
-import base64
 
 # ========== DATABASE SETUP ==========
 DB_PATH = "trading_journal.db"
@@ -25,14 +21,9 @@ DB_PATH = "trading_journal.db"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
-# ========== OANDA API CONFIGURATION (Cloud-Friendly) ==========
-# Get free demo account at: https://www.oanda.com/demo-account/
-OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
-OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
-OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # practice or live
-
-# Oanda API endpoints
-OANDA_URL = f"https://api-fxpractice.oanda.com/v3" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com/v3"
+# ========== FCS API (FREE, NO KEY NEEDED) ==========
+# No API key required for basic tier!
+FCS_BASE_URL = "https://api-v4.fcsapi.com"
 
 # ========== PAPER TRADING ACCOUNT ==========
 PAPER_BALANCE = 10000.0
@@ -128,97 +119,44 @@ def log_paper_trade(symbol, direction, entry_price, quantity, exit_price, pnl):
 
 init_database()
 
-# ========== OANDA API FUNCTIONS (Cloud-Friendly) ==========
-def get_oanda_headers():
-    return {
-        "Authorization": f"Bearer {OANDA_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-def get_oanda_account_summary():
-    """Get account balance and info from Oanda"""
-    if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
-        return None
-    
-    url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/summary"
-    try:
-        response = requests.get(url, headers=get_oanda_headers(), timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            account = data.get('account', {})
-            return {
-                'balance': float(account.get('balance', 0)),
-                'equity': float(account.get('nav', 0)),
-                'pnl': float(account.get('unrealizedPL', 0)),
-                'margin_used': float(account.get('marginUsed', 0))
-            }
-    except Exception as e:
-        print(f"Oanda error: {e}")
-    return None
-
-def get_oanda_prices(symbol):
-    """Get current price from Oanda"""
-    if not OANDA_API_KEY:
-        return None, None
-    
-    # Convert symbol format: EUR/USD -> EUR_USD
-    oanda_symbol = symbol.replace("/", "_")
-    url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/pricing?instruments={oanda_symbol}"
+# ========== FCS API FUNCTIONS (FREE, NO KEY) ==========
+@st.cache_data(ttl=30)
+def get_fcs_forex_rate(symbol="EUR/USD"):
+    """Get current forex rate from FCS API - FREE, no key needed"""
+    url = f"{FCS_BASE_URL}/forex/list"
+    params = {"symbol": symbol}
     
     try:
-        response = requests.get(url, headers=get_oanda_headers(), timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            prices = data.get('prices', [])
-            if prices:
-                return float(prices[0].get('bids', [{}])[0].get('price', 0)), float(prices[0].get('asks', [{}])[0].get('price', 0))
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
+        if data.get("status") and data.get("response"):
+            return float(data["response"][0]["c"])
     except Exception as e:
-        print(f"Price error: {e}")
-    return None, None
+        st.warning(f"FCS API error: {e}")
+    
+    # Fallback rates
+    fallback = {"EUR/USD": 1.0925, "GBP/USD": 1.2850, "USD/JPY": 148.50}
+    return fallback.get(symbol, 1.0925)
 
-def place_oanda_order(symbol, units, stop_loss_pips=50, take_profit_pips=100):
-    """Place market order on Oanda demo account"""
-    if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
-        return False, "Oanda not configured"
+@st.cache_data(ttl=60)
+def get_fcs_crypto_price(coin="BTC"):
+    """Get crypto price from FCS API"""
+    url = f"{FCS_BASE_URL}/crypto/single"
+    params = {"symbol": f"{coin}/USD"}
     
-    oanda_symbol = symbol.replace("/", "_")
-    
-    # Get current price for SL/TP calculation
-    bid, ask = get_oanda_prices(symbol)
-    if not bid or not ask:
-        return False, "Cannot get current price"
-    
-    # Calculate SL/TP
-    pip_size = 0.0001 if "JPY" not in symbol else 0.01
-    if units > 0:  # Buy
-        price = ask
-        stop_loss = round(price - (stop_loss_pips * pip_size), 5)
-        take_profit = round(price + (take_profit_pips * pip_size), 5)
-    else:  # Sell
-        price = bid
-        stop_loss = round(price + (stop_loss_pips * pip_size), 5)
-        take_profit = round(price - (take_profit_pips * pip_size), 5)
-    
-    order = {
-        "order": {
-            "type": "MARKET",
-            "instrument": oanda_symbol,
-            "units": str(units),
-            "stopLossOnFill": {"price": str(stop_loss)},
-            "takeProfitOnFill": {"price": str(take_profit)},
-            "positionFill": "DEFAULT"
-        }
-    }
-    
-    url = f"{OANDA_URL}/accounts/{OANDA_ACCOUNT_ID}/orders"
     try:
-        response = requests.post(url, headers=get_oanda_headers(), json=order, timeout=10)
-        if response.status_code == 201:
-            return True, f"Order placed: {units} units of {symbol}"
-        else:
-            return False, f"Order failed: {response.text}"
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
+        if data.get("status") and data.get("response"):
+            return float(data["response"]["c"])
     except Exception as e:
-        return False, f"Error: {e}"
+        st.warning(f"Crypto API error: {e}")
+    
+    # Fallback prices
+    fallback = {"BTC": 65000, "ETH": 3500, "SOL": 150}
+    return fallback.get(coin, 65000)
 
 # ========== TELEGRAM FUNCTIONS ==========
 def send_telegram_message(message):
@@ -322,18 +260,11 @@ class SimpleMLPredictor:
 ml_predictor = SimpleMLPredictor()
 
 # ========== DATA FETCHING ==========
-@st.cache_data(ttl=30)
 def get_live_forex_rates():
-    url = "https://api.exchangerate.host/latest?base=USD"
-    try:
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        if "rates" in data:
-            return {"EUR": data["rates"].get("EUR", 0.92), "GBP": data["rates"].get("GBP", 0.79), 
-                    "JPY": data["rates"].get("JPY", 148.5)}
-    except:
-        pass
-    return {"EUR": 0.92, "GBP": 0.79, "JPY": 148.5}
+    rates = {}
+    for pair in ["EUR/USD", "GBP/USD", "USD/JPY"]:
+        rates[pair[:3]] = get_fcs_forex_rate(pair)
+    return rates
 
 def generate_chart_data(current_price, days=60):
     dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
@@ -363,9 +294,9 @@ def generate_chart_data(current_price, days=60):
     return df
 
 # ========== PAGE SETUP ==========
-st.set_page_config(page_title="Trading AI Pro", layout="wide")
-st.title("🤖 AI Trading Assistant Pro - Cloud Edition")
-st.caption("Daily Reports | Paper Trading | ML Predictions | Oanda API | 24/7 Cloud")
+st.set_page_config(page_title="Trading AI Pro - FCS API", layout="wide")
+st.title("🤖 AI Trading Assistant Pro - FCS API Edition")
+st.caption("✅ 100% Free | No API Key Required | Live Forex & Crypto Data")
 
 # ========== SESSION STATE ==========
 if 'auto_signal' not in st.session_state:
@@ -382,22 +313,19 @@ if asset_type == "Forex":
     rates = get_live_forex_rates()
     current_price = rates[currency]
     symbol_display = f"{currency}/USD"
+    st.sidebar.success(f"💵 1 USD = {current_price:.4f} {currency}")
 else:
-    coin_display = st.sidebar.selectbox("Cryptocurrency", ["BTC", "ETH"])
-    current_price = 65000 if coin_display == "BTC" else 3500
+    coin_display = st.sidebar.selectbox("Cryptocurrency", ["BTC", "ETH", "SOL"])
+    current_price = get_fcs_crypto_price(coin_display)
     symbol_display = f"{coin_display}/USD"
+    st.sidebar.success(f"💰 {coin_display} = ${current_price:,.2f}")
 
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
-# Oanda config status in sidebar
 st.sidebar.markdown("---")
-st.sidebar.subheader("💹 Live Trading")
-if OANDA_API_KEY and OANDA_ACCOUNT_ID:
-    st.sidebar.success("✅ Oanda API Configured")
-else:
-    st.sidebar.warning("⚠️ Oanda API: Get free demo account at oanda.com")
+st.sidebar.info("📡 **Data Source:** FCS API\n✅ Free tier: 60 calls/min\n✅ No API key required!")
 
 # ========== GENERATE DATA ==========
 with st.spinner("Analyzing markets..."):
@@ -431,9 +359,9 @@ ml_predictor.train(history)
 ml_prediction, ml_confidence = ml_predictor.predict(rsi)
 
 # ========== TABS ==========
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Dashboard", "📱 Telegram", "💰 Paper Trading", 
-    "🧠 ML Predictions", "💹 Live Trading (Oanda)", "📓 Journal"
+    "🧠 ML Predictions", "📓 Journal"
 ])
 
 # ========== TAB 1: DASHBOARD ==========
@@ -465,17 +393,17 @@ with tab2:
     if TELEGRAM_TOKEN and CHAT_ID:
         st.success("✅ Telegram configured")
     else:
-        st.warning("⚠️ Add TELEGRAM_TOKEN and CHAT_ID environment variables")
+        st.warning("⚠️ Add TELEGRAM_TOKEN and CHAT_ID environment variables in Render")
     
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📤 Send Test Message"):
-            send_telegram_message("✅ Trading bot is live on Render Cloud!")
+            send_telegram_message("✅ Trading bot is live with FCS API!")
             st.success("Sent!")
     
     with col2:
         if st.button("📤 Send Current Signal"):
-            send_telegram_message(f"🚨 {symbol_display}: {signal}\nPrice: ${current_price:,.2f}\nRSI: {rsi:.1f}\nML: {ml_prediction}")
+            send_telegram_message(f"🚨 {symbol_display}: {signal}\nPrice: ${current_price:,.2f}\nRSI: {rsi:.1f}")
             st.success("Sent!")
     
     st.markdown("---")
@@ -549,104 +477,8 @@ with tab4:
     else:
         st.warning("⚠️ Review more signals to train the AI model")
 
-# ========== TAB 5: LIVE TRADING (OANDA) ==========
+# ========== TAB 5: JOURNAL ==========
 with tab5:
-    st.subheader("💹 Live Trading - Oanda API (Cloud-Ready)")
-    
-    st.info("""
-    ### 📝 How to Set Up Oanda Demo Account (Free):
-    
-    1. Go to [Oanda.com](https://www.oanda.com/demo-account/)
-    2. Sign up for a FREE demo account
-    3. Get your API Key from Account Management → API Access
-    4. Get your Account ID from Account Summary
-    5. Add these to Render Environment Variables:
-       - `OANDA_API_KEY` = your api key
-       - `OANDA_ACCOUNT_ID` = your account id
-       - `OANDA_ENVIRONMENT` = practice
-    """)
-    
-    if OANDA_API_KEY and OANDA_ACCOUNT_ID:
-        st.success("✅ Oanda API Configured!")
-        
-        # Show account info
-        account = get_oanda_account_summary()
-        if account:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Balance", f"${account['balance']:.2f}")
-            with col2:
-                st.metric("Equity", f"${account['equity']:.2f}")
-            with col3:
-                profit_color = "green" if account['pnl'] >= 0 else "red"
-                st.metric("Unrealized P&L", f"${account['pnl']:.2f}", delta_color=profit_color)
-        
-        # Manual order
-        st.subheader("Manual Order Entry")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            oanda_symbol = st.selectbox("Symbol", ["EUR/USD", "GBP/USD", "USD/JPY"])
-        with col2:
-            oanda_units = st.number_input("Units (1000 = 0.01 lots)", min_value=100, max_value=100000, value=1000, step=1000)
-        with col3:
-            order_direction = st.selectbox("Direction", ["BUY", "SELL"])
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            sl_pips = st.number_input("Stop Loss (pips)", 10, 200, 50)
-        with col2:
-            tp_pips = st.number_input("Take Profit (pips)", 10, 500, 100)
-        
-        units = oanda_units if order_direction == "BUY" else -oanda_units
-        
-        if st.button(f"Place {order_direction} Order", use_container_width=True):
-            success, msg = place_oanda_order(oanda_symbol, units, sl_pips, tp_pips)
-            if success:
-                st.success(msg)
-            else:
-                st.error(msg)
-        
-        # Auto-trade from signal
-        st.markdown("---")
-        st.subheader("🤖 Auto-Trade from AI Signal")
-        
-        auto_trade_enabled = st.checkbox("Enable Auto-Trading on Oanda", value=False)
-        if auto_trade_enabled:
-            st.warning("⚠️ Auto-trading is enabled. Trades will execute on your DEMO account!")
-            
-            if signal != "HOLD ⏸️":
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.info(f"Current Signal: {signal}")
-                with col2:
-                    if st.button("Execute Auto-Trade Now"):
-                        units_to_trade = 1000 if "BUY" in signal else -1000
-                        success, msg = place_oanda_order(symbol_display, units_to_trade, 50, 100)
-                        if success:
-                            st.success(f"Auto-trade executed! {msg}")
-                            log_signal(symbol_display, asset_type, signal, current_price, rsi, macd,
-                                      latest['SMA_20'], latest['SMA_50'], confidence.lower())
-                        else:
-                            st.error(msg)
-    else:
-        st.warning("⚠️ Oanda API not configured. Add OANDA_API_KEY and OANDA_ACCOUNT_ID to environment variables.")
-        
-        # Show how to configure
-        with st.expander("🔧 How to Configure Oanda on Render"):
-            st.markdown("""
-            1. Go to your Render dashboard
-            2. Select your trading-bot service
-            3. Click "Environment" tab
-            4. Add these variables:
-               - `OANDA_API_KEY` = your_api_key_here
-               - `OANDA_ACCOUNT_ID` = your_account_id_here
-               - `OANDA_ENVIRONMENT` = practice
-            5. Click "Save Changes"
-            6. Manual Deploy → Deploy latest commit
-            """)
-
-# ========== TAB 6: JOURNAL ==========
-with tab6:
     st.subheader("📓 Trading Journal")
     
     stats = get_signal_statistics()
@@ -681,7 +513,6 @@ with tab6:
         display_df.columns = ['Time', 'Symbol', 'Signal', 'Price', 'RSI', 'Confidence', 'Accuracy']
         st.dataframe(display_df, use_container_width=True)
         
-        # Export
         if st.button("📥 Export to CSV"):
             csv = history.to_csv(index=False)
             st.download_button("Download CSV", csv, f"journal_{dt.now().strftime('%Y%m%d')}.csv", "text/csv")
@@ -705,4 +536,4 @@ if not hasattr(st, 'report_scheduler_started'):
 
 # ========== FOOTER ==========
 st.markdown("---")
-st.caption("⚠️ Educational purposes only | Running 24/7 on Render Cloud | Oanda Demo Trading")
+st.caption("⚠️ Educational purposes only | Data: FCS API (Free) | Running on Render 24/7")
