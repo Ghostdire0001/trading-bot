@@ -1,5 +1,4 @@
-# trading_dashboard.py - Complete with Alpaca Paper Trading
-# Features: Live Data (FCS API) + Paper Trading (Alpaca) + Telegram + ML
+# trading_dashboard.py - Complete with Alpaca Paper Trading (FIXED)
 
 import streamlit as st
 import pandas as pd
@@ -24,26 +23,25 @@ except ImportError:
     print("Alpaca not available - run: pip install alpaca-trade-api")
 
 # ========== ALPACA PAPER TRADING CONFIGURATION ==========
-# YOUR API KEYS (Already generated)
 ALPACA_API_KEY = "PKTCBEAIG5AYYQDWLWIQFZSNUC"
 ALPACA_SECRET_KEY = "EUr7YaSHiHyyF8D8hsg3cdCYLWrVF54DW3NRqXUoqWqA"
-ALPACA_BASE_URL = "https://paper-api.alpaca.markets"  # Paper trading URL
+ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
 
-# Symbol mapping for Alpaca
+# Symbol mapping
 ALPACA_SYMBOL_MAP = {
-    "EUR/USD": "EUR/USD",
-    "GBP/USD": "GBP/USD", 
-    "USD/JPY": "USD/JPY",
-    "BTC/USD": "BTC/USD",
-    "ETH/USD": "ETH/USD",
+    "EUR/USD": "EURUSD",
+    "GBP/USD": "GBPUSD", 
+    "USD/JPY": "USDJPY",
+    "BTC/USD": "BTCUSD",
+    "ETH/USD": "ETHUSD",
 }
 
 # ========== DATABASE SETUP ==========
 DB_PATH = "trading_journal.db"
 
 # ========== TELEGRAM CONFIGURATION ==========
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8355355959:AAHDxCtlmMS76i4qZDE8iScdIB_DQSXQkNg")
-CHAT_ID = os.environ.get("CHAT_ID", "5329083681")
+TELEGRAM_TOKEN = "8355355959:AAHDxCtlmMS76i4qZDE8iScdIB_DQSXQkNg"
+CHAT_ID = "5329083681"
 
 # ========== PAPER TRADING ACCOUNT (Fallback) ==========
 PAPER_BALANCE = 10000.0
@@ -52,7 +50,7 @@ if 'paper_balance' not in st.session_state:
 if 'paper_positions' not in st.session_state:
     st.session_state['paper_positions'] = []
 
-# ========== ALPACA FUNCTIONS ==========
+# ========== ALPACA FUNCTIONS (FIXED) ==========
 def init_alpaca():
     """Initialize Alpaca API connection"""
     if not ALPACA_AVAILABLE:
@@ -65,7 +63,7 @@ def init_alpaca():
         return None
 
 def get_alpaca_account():
-    """Get account information from Alpaca"""
+    """Get account information from Alpaca (FIXED)"""
     api = init_alpaca()
     if not api:
         return None
@@ -75,9 +73,10 @@ def get_alpaca_account():
         return {
             'balance': float(account.buying_power),
             'equity': float(account.equity),
-            'day_pnl': float(account.day_trade_count),
             'buying_power': float(account.buying_power),
-            'cash': float(account.cash)
+            'cash': float(account.cash),
+            'portfolio_value': float(account.portfolio_value),
+            'day_trade_count': 0  # Not available in API, set to 0
         }
     except Exception as e:
         st.warning(f"Could not fetch Alpaca account: {e}")
@@ -90,13 +89,13 @@ def place_alpaca_order(symbol, qty, side, order_type='market', time_in_force='da
         return False, "Alpaca API not available"
     
     try:
-        # Convert symbol to Alpaca format
-        alpaca_symbol = ALPACA_SYMBOL_MAP.get(symbol, symbol)
+        # Get the correct symbol format
+        alpaca_symbol = ALPACA_SYMBOL_MAP.get(symbol, symbol.replace("/", ""))
         
         order = api.submit_order(
             symbol=alpaca_symbol,
             qty=qty,
-            side=side,  # 'buy' or 'sell'
+            side=side,
             type=order_type,
             time_in_force=time_in_force
         )
@@ -116,7 +115,7 @@ def close_all_alpaca_positions():
             api.close_position(position.symbol)
         return True, "All positions closed"
     except Exception as e:
-        return False, f"Error closing positions: {e}"
+        return False, f"Error: {e}"
 
 def get_alpaca_positions():
     """Get current open positions"""
@@ -134,11 +133,23 @@ def get_alpaca_positions():
                 'avg_entry_price': float(pos.avg_entry_price),
                 'current_price': float(pos.current_price),
                 'pnl': float(pos.unrealized_pl),
-                'pnl_percent': float(pos.unrealized_plpc) * 100
+                'pnl_percent': float(pos.unrealized_plpc) * 100 if pos.unrealized_plpc else 0
             })
         return positions_data
     except Exception as e:
         return []
+
+def test_alpaca_connection():
+    """Test if Alpaca API keys work"""
+    api = init_alpaca()
+    if not api:
+        return False, "API not initialized"
+    
+    try:
+        account = api.get_account()
+        return True, f"Connected! Balance: ${float(account.buying_power):,.2f}"
+    except Exception as e:
+        return False, f"Connection failed: {str(e)}"
 
 # ========== DATABASE FUNCTIONS ==========
 def init_database():
@@ -235,39 +246,34 @@ def update_signal_accuracy(signal_id, was_correct):
 
 init_database()
 
-# ========== FCS API FUNCTIONS (FREE DATA) ==========
+# ========== FCS API FUNCTIONS ==========
 @st.cache_data(ttl=30)
 def get_fcs_forex_rate(symbol="EUR/USD"):
-    """Get current forex rate from FCS API - FREE, no key needed"""
     url = "https://api-v4.fcsapi.com/forex/latest"
     params = {"symbol": symbol, "level": 1}
     
     try:
         response = requests.get(url, params=params, timeout=10)
         data = response.json()
-        
         if data.get("status") and data.get("response"):
             return float(data["response"]["c"])
-    except Exception as e:
+    except:
         pass
     
-    # Fallback rates
     fallback = {"EUR/USD": 1.0925, "GBP/USD": 1.2850, "USD/JPY": 148.50}
     return fallback.get(symbol, 1.0925)
 
 @st.cache_data(ttl=60)
 def get_fcs_crypto_price(coin="BTC"):
-    """Get crypto price from FCS API"""
     url = "https://api-v4.fcsapi.com/crypto/latest"
     params = {"symbol": f"{coin}/USD", "level": 1}
     
     try:
         response = requests.get(url, params=params, timeout=10)
         data = response.json()
-        
         if data.get("status") and data.get("response"):
             return float(data["response"]["c"])
-    except Exception as e:
+    except:
         pass
     
     fallback = {"BTC": 65000, "ETH": 3500, "SOL": 150}
@@ -446,14 +452,11 @@ st.sidebar.info("📡 **Data:** FCS API (Free)\n💰 **Trading:** Alpaca Paper\n
 # Alpaca Status in Sidebar
 st.sidebar.markdown("---")
 st.sidebar.subheader("💹 Alpaca Status")
-if ALPACA_AVAILABLE:
-    account = get_alpaca_account()
-    if account:
-        st.sidebar.success(f"✅ Connected!\nBalance: ${account['balance']:,.2f}")
-    else:
-        st.sidebar.warning("⚠️ Alpaca: Check connection")
+test_result, test_msg = test_alpaca_connection()
+if test_result:
+    st.sidebar.success(f"✅ {test_msg}")
 else:
-    st.sidebar.error("❌ Alpaca not installed")
+    st.sidebar.error(f"❌ {test_msg}")
 
 # ========== GENERATE DATA ==========
 with st.spinner("Analyzing markets..."):
@@ -526,7 +529,7 @@ with tab2:
     
     with col2:
         if st.button("📤 Send Current Signal"):
-            send_telegram_message(f"🚨 {symbol_display}: {signal}\nPrice: ${current_price:,.2f}\nRSI: {rsi:.1f}\nML: {ml_prediction}")
+            send_telegram_message(f"🚨 {symbol_display}: {signal}\nPrice: ${current_price:,.2f}\nRSI: {rsi:.1f}")
             st.success("Sent!")
     
     st.markdown("---")
@@ -589,15 +592,25 @@ with tab4:
         with col3:
             st.metric("Equity", f"${account['equity']:,.2f}")
         with col4:
-            st.metric("Day Trades", account['day_pnl'])
+            st.metric("Portfolio Value", f"${account['portfolio_value']:,.2f}")
         st.success("✅ Connected to Alpaca Paper Trading!")
     else:
-        st.error("❌ Cannot connect to Alpaca. Check your API keys.")
-        st.code("""
-        Your API Keys:
-        API Key: PKTCBEAIG5AYYQDWLWIQFZSNUC
-        Secret: EUr7YaSHiHyyF8D8hsg3cdCYLWrVF54DW3NRqXUoqWqA
-        """)
+        st.error("❌ Cannot connect to Alpaca. Check your API keys and internet connection.")
+        
+        # Show debug info
+        with st.expander("🔧 Debug Information"):
+            st.write("API Key:", ALPACA_API_KEY[:10] + "...")
+            st.write("Secret Key:", ALPACA_SECRET_KEY[:10] + "...")
+            st.write("Base URL:", ALPACA_BASE_URL)
+            st.write("Alpaca Available:", ALPACA_AVAILABLE)
+            
+            # Test connection
+            if st.button("Test Connection"):
+                success, msg = test_alpaca_connection()
+                if success:
+                    st.success(msg)
+                else:
+                    st.error(msg)
     
     st.markdown("---")
     
@@ -609,7 +622,7 @@ with tab4:
     with col2:
         order_side = st.selectbox("Side", ["buy", "sell"])
     with col3:
-        order_qty = st.number_input("Quantity (Units)", min_value=0.001, value=0.01, step=0.001, format="%.3f")
+        order_qty = st.number_input("Quantity", min_value=0.001, value=0.01, step=0.001, format="%.3f")
     
     if st.button(f"Place {order_side.upper()} Order", use_container_width=True):
         success, msg = place_alpaca_order(alpaca_symbol_selector, order_qty, order_side)
@@ -632,14 +645,15 @@ with tab4:
         if signal != "HOLD ⏸️":
             col1, col2 = st.columns(2)
             with col1:
-                st.info(f"Current Signal: {signal}")
-                st.write(f"Symbol: {alpaca_symbol}")
-                st.write(f"Price: ${current_price:,.2f}")
+                st.info(f"**Current Signal:** {signal}")
+                st.write(f"**Symbol:** {alpaca_symbol}")
+                st.write(f"**Price:** ${current_price:,.2f}")
+                st.write(f"**RSI:** {rsi:.1f}")
             with col2:
                 qty_to_trade = 0.01 if asset_type == "Forex" else 0.001
                 side = "buy" if "BUY" in signal else "sell"
                 
-                if st.button("Execute Auto-Trade Now", use_container_width=True):
+                if st.button("🚀 Execute Auto-Trade Now", use_container_width=True):
                     success, msg = place_alpaca_order(alpaca_symbol, qty_to_trade, side)
                     if success:
                         st.success(f"Auto-trade executed! {msg}")
@@ -647,10 +661,11 @@ with tab4:
                                   latest['SMA_20'], latest['SMA_50'], confidence.lower())
                         log_alpaca_trade(alpaca_symbol, side, qty_to_trade, current_price, "auto", "placed")
                         send_telegram_message(f"🤖 AUTO TRADE EXECUTED\n{symbol_display}: {signal}\nQty: {qty_to_trade}\nPrice: ${current_price:,.2f}")
+                        st.rerun()
                     else:
                         st.error(msg)
         else:
-            st.info("No active signal. Waiting for BUY/SELL condition.")
+            st.info("📊 No active signal. Waiting for BUY/SELL condition.")
     
     st.markdown("---")
     
@@ -755,4 +770,4 @@ if not hasattr(st, 'report_scheduler_started'):
 
 # ========== FOOTER ==========
 st.markdown("---")
-st.caption("⚠️ Educational purposes only | Data: FCS API (Free) | Trading: Alpaca Paper | Running on Render 24/7")
+st.caption("⚠️ Educational purposes only | Data: FCS API (Free) | Trading: Alpaca Paper | Running 24/7")
